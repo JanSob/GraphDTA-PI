@@ -1,3 +1,8 @@
+## Project notes
+
+This fork is used for our ML paper project on ligand-subgraph / prime-implicant style explanations for GraphDTA-style binding-affinity prediction.
+
+
 # Resources:
 
 + README.md: this file.
