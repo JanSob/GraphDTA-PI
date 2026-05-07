@@ -17,11 +17,11 @@ class TestbedDataset(InMemoryDataset):
         self.dataset = dataset
         if os.path.isfile(self.processed_paths[0]):
             print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
         else:
             print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
             self.process(xd, xt, y,smile_graph)
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -58,12 +58,13 @@ class TestbedDataset(InMemoryDataset):
             target = xt[i]
             labels = y[i]
             # convert SMILES to molecular representation using rdkit
-            c_size, features, edge_index = smile_graph[smiles]
+            c_size, features, edge_index, mol_features = smile_graph[smiles]
             # make the graph ready for PyTorch Geometrics GCN algorithms:
             GCNData = DATA.Data(x=torch.Tensor(features),
                                 edge_index=torch.LongTensor(edge_index).transpose(1, 0),
                                 y=torch.FloatTensor([labels]))
             GCNData.target = torch.LongTensor([target])
+            GCNData.mol_features = torch.FloatTensor([mol_features])
             GCNData.__setitem__('c_size', torch.LongTensor([c_size]))
             # append graph, label and target sequence to data list
             data_list.append(GCNData)

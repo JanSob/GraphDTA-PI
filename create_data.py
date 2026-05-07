@@ -4,16 +4,37 @@ import os
 import json,pickle
 from collections import OrderedDict
 from rdkit import Chem
-from rdkit.Chem import MolFromSmiles
+from rdkit.Chem import MolFromSmiles, Descriptors, rdMolDescriptors
 import networkx as nx
 from utils import *
+
+# This function one-hot-encodes / numerically encodes the features of a single ligand atom.
+#
+# Original atom features:
+# - atom type
+# - atom degree: number of directly bonded neighboring atoms
+# - total number of hydrogens bonded to the atom
+# - implicit valence
+# - aromaticity
+#
+# Added atom features:
+# - formal charge
+# - hybridization
+# - ring membership: whether the atom is part of a ring
+# - heteroatom flag: whether the atom is not carbon or hydrogen
+# - halogen flag: whether the atom is F, Cl, Br, or I
 
 def atom_features(atom):
     return np.array(one_of_k_encoding_unk(atom.GetSymbol(),['C', 'N', 'O', 'S', 'F', 'Si', 'P', 'Cl', 'Br', 'Mg', 'Na','Ca', 'Fe', 'As', 'Al', 'I', 'B', 'V', 'K', 'Tl', 'Yb','Sb', 'Sn', 'Ag', 'Pd', 'Co', 'Se', 'Ti', 'Zn', 'H','Li', 'Ge', 'Cu', 'Au', 'Ni', 'Cd', 'In', 'Mn', 'Zr','Cr', 'Pt', 'Hg', 'Pb', 'Unknown']) +
                     one_of_k_encoding(atom.GetDegree(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
                     one_of_k_encoding_unk(atom.GetTotalNumHs(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
-                    one_of_k_encoding_unk(atom.GetImplicitValence(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
-                    [atom.GetIsAromatic()])
+                    one_of_k_encoding_unk(atom.GetValence(Chem.ValenceType.IMPLICIT), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) +
+                    one_of_k_encoding_unk(atom.GetFormalCharge(), [-2, -1, 0, 1, 2, 'Other']) +
+                    one_of_k_encoding_unk(str(atom.GetHybridization()), ['SP', 'SP2', 'SP3', 'SP3D', 'SP3D2', 'Other']) +
+                    [atom.GetIsAromatic(),
+                     atom.IsInRing(),
+                     atom.GetSymbol() not in ['C', 'H'],
+                     atom.GetSymbol() in ['F', 'Cl', 'Br', 'I']])
 
 def one_of_k_encoding(x, allowable_set):
     if x not in allowable_set:
@@ -26,8 +47,42 @@ def one_of_k_encoding_unk(x, allowable_set):
         x = allowable_set[-1]
     return list(map(lambda s: x == s, allowable_set))
 
+
+# This function creates a molecule-level/global ligand feature vector.
+# Unlike atom_features(atom), these descriptors describe the whole ligand molecule,
+# not a single atom or bond.
+#
+# Added molecule-level features:
+# - molecular weight
+# - logP: lipophilicity / hydrophobicity estimate
+# - TPSA: topological polar surface area
+# - number of rotatable bonds
+# - number of H-bond donors
+# - number of H-bond acceptors
+# - number of heteroatoms
+# - number of rings
+def molecule_features(mol):
+    return np.array([
+        Descriptors.MolWt(mol),
+        Descriptors.MolLogP(mol),
+        rdMolDescriptors.CalcTPSA(mol),
+        Descriptors.NumRotatableBonds(mol),
+        Descriptors.NumHDonors(mol),
+        Descriptors.NumHAcceptors(mol),
+        Descriptors.NumHeteroatoms(mol),
+        rdMolDescriptors.CalcNumRings(mol),
+    ])
+
+# This function creates the full ligand graph.
+# return parameters:
+# - c_size,
+# - features,
+# - edge_index
+# - mol_features
 def smile_to_graph(smile):
     mol = Chem.MolFromSmiles(smile)
+
+    mol_features = molecule_features(mol)
     
     c_size = mol.GetNumAtoms()
     
@@ -44,7 +99,7 @@ def smile_to_graph(smile):
     for e1, e2 in g.edges:
         edge_index.append([e1, e2])
         
-    return c_size, features, edge_index
+    return c_size, features, edge_index, mol_features
 
 def seq_cat(prot):
     x = np.zeros(max_seq_len)
@@ -54,6 +109,7 @@ def seq_cat(prot):
 
 
 # from DeepDTA data
+# Data is prepared --> load proteins, affinity scores, ligands
 all_prots = []
 datasets = ['kiba','davis']
 for dataset in datasets:
@@ -95,8 +151,11 @@ for dataset in datasets:
     print('test_fold:', len(valid_fold))
     print('len(set(drugs)),len(set(prots)):', len(set(drugs)),len(set(prots)))
     all_prots += list(set(prots))
-    
-    
+
+# This next part:
+# protein sequence letters → integer numbers
+# ligand atoms → one-hot/binary feature vectors
+# ligand bonds → edge_index connections between atom indices
 seq_voc = "ABCDEFGHIKLMNOPQRSTUVWXYZ"
 seq_dict = {v:(i+1) for i,v in enumerate(seq_voc)}
 seq_dict_len = len(seq_dict)
@@ -129,7 +188,7 @@ for dataset in datasets:
         XT = [seq_cat(t) for t in test_prots]
         test_drugs, test_prots,  test_Y = np.asarray(test_drugs), np.asarray(XT), np.asarray(test_Y)
 
-        # make data PyTorch Geometric ready
+        # make data PyTorch Geometric ready (library used for graph neural networks)
         print('preparing ', dataset + '_train.pt in pytorch format!')
         train_data = TestbedDataset(root='data', dataset=dataset+'_train', xd=train_drugs, xt=train_prots, y=train_Y,smile_graph=smile_graph)
         print('preparing ', dataset + '_test.pt in pytorch format!')
