@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 TARGET_FEATURE_COLUMNS = [
     "target_id",
@@ -38,6 +39,7 @@ KLIFS_HINGE_END = 48
 KLIFS_API_BASE = "https://klifs.net/api"
 KLIFS_API_CACHE = {}
 KLIFS_STRUCTURE_CACHE = {}
+KLIFS_CACHE_LOCK = Lock()
 
 MANUAL_KLIFS_IDS = {
 }
@@ -159,10 +161,17 @@ def choose_best_structure_from_api(structures):
 def klifs_api_get(path, **params):
     query = urllib.parse.urlencode(params, doseq=True)
     url = f"{KLIFS_API_BASE}{path}?{query}" if query else f"{KLIFS_API_BASE}{path}"
-    if url not in KLIFS_API_CACHE:
-        with urllib.request.urlopen(url) as response:
-            KLIFS_API_CACHE[url] = json.load(response)
-    return KLIFS_API_CACHE[url]
+    with KLIFS_CACHE_LOCK:
+        if url in KLIFS_API_CACHE:
+            return KLIFS_API_CACHE[url]
+
+    with urllib.request.urlopen(url) as response:
+        data = json.load(response)
+
+    with KLIFS_CACHE_LOCK:
+        if url not in KLIFS_API_CACHE:
+            KLIFS_API_CACHE[url] = data
+        return KLIFS_API_CACHE[url]
 
 def normalize_klifs_sequence(klifs_seq):
     if pd.isna(klifs_seq):
@@ -308,13 +317,21 @@ def fetch_klifs_features(target_id, target_sequence):
     if not kinase_klifs_id:
         return row
 
-    if kinase_klifs_id not in KLIFS_STRUCTURE_CACHE:
-        try:
-            KLIFS_STRUCTURE_CACHE[kinase_klifs_id] = klifs_api_get("/structures_list", kinase_ID=kinase_klifs_id)
-        except urllib.error.HTTPError:
-            KLIFS_STRUCTURE_CACHE[kinase_klifs_id] = []
+    with KLIFS_CACHE_LOCK:
+        cached_structures = KLIFS_STRUCTURE_CACHE.get(kinase_klifs_id)
 
-    best_structure = choose_best_structure_from_api(KLIFS_STRUCTURE_CACHE[kinase_klifs_id])
+    if cached_structures is None:
+        try:
+            cached_structures = klifs_api_get("/structures_list", kinase_ID=kinase_klifs_id)
+        except urllib.error.HTTPError:
+            cached_structures = []
+
+        with KLIFS_CACHE_LOCK:
+            if kinase_klifs_id not in KLIFS_STRUCTURE_CACHE:
+                KLIFS_STRUCTURE_CACHE[kinase_klifs_id] = cached_structures
+            cached_structures = KLIFS_STRUCTURE_CACHE[kinase_klifs_id]
+
+    best_structure = choose_best_structure_from_api(cached_structures)
     if best_structure is None:
         return row
 
