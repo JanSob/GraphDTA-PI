@@ -6,6 +6,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TARGET_FEATURE_COLUMNS = [
     "target_id",
@@ -320,6 +321,28 @@ def fetch_klifs_features(target_id, target_sequence):
     row = populate_row_from_structure_fields(row, best_structure)
     return row
 
+def fetch_target_row(dataset, target_id, target_sequence):
+    try:
+        return fetch_klifs_features(target_id, target_sequence)
+    except Exception as e:
+        print(f"[warn] {dataset} {target_id}: {e}")
+        return empty_feature_row(target_id, target_sequence)
+
+# safely parallelize (preserve row order)
+def build_row_parallel(dataset, targets, max_workers=0):
+    rows_by_index = {}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_index = {
+            executor.submit(fetch_target_row, dataset, target_id, target_sequence): i
+            for i, (target_id, target_sequence) in enumerate(targets)
+        }
+        
+        for future in as_completed(future_to_index):
+            i = future_to_index[future]
+            rows_by_index[i] = future.result()
+    return [rows_by_index[i] for i in range(len(targets))]
+      
 # tries to fetch features from klifs via opencadd by target_id
 # if target_id could not be resolved, fill the row with default values
 def build_target_feature_table(dataset, force=False):
@@ -330,13 +353,8 @@ def build_target_feature_table(dataset, force=False):
 
     rows = []
     
-    for target_id, target_sequence in load_targets_from_proteins_file(dataset):
-        try: 
-            row = fetch_klifs_features(target_id, target_sequence)
-        except Exception as e:
-            row = empty_feature_row(target_id, target_sequence)
-            print(f"[warn] {dataset} {target_id}: {e}")    
-        rows.append(row)    
+    targets = load_targets_from_proteins_file(dataset)
+    rows = build_row_parallel(dataset, targets, max_workers=6)
     
     df = pd.DataFrame(rows, columns=TARGET_FEATURE_COLUMNS).fillna("")
     donor_dfs = load_existing_feature_tables(dataset)
