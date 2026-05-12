@@ -70,6 +70,8 @@ for dataset in datasets:
     else:
         train_data = TestbedDataset(root='data', dataset=dataset+'_train')
         test_data = TestbedDataset(root='data', dataset=dataset+'_test')
+        protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
+        print('protein_feat_dim:', protein_feat_dim)
         
         # make data PyTorch mini-batch processing ready
         train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
@@ -77,7 +79,12 @@ for dataset in datasets:
 
         # training the model
         device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-        model = modeling().to(device)
+        
+        if model_st == 'GINConvNet':
+            model = modeling(protein_feat_dim=protein_feat_dim).to(device)
+        else:
+            model = modeling().to(device)
+        
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
         best_mse = 1000
@@ -99,4 +106,3 @@ for dataset in datasets:
                 print('rmse improved at epoch ', best_epoch, '; best_mse,best_ci:', best_mse,best_ci,model_st,dataset)
             else:
                 print(ret[1],'No improvement since epoch ', best_epoch, '; best_mse,best_ci:', best_mse,best_ci,model_st,dataset)
-

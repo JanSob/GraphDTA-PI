@@ -70,6 +70,8 @@ for dataset in datasets:
     else:
         train_data = TestbedDataset(root='data', dataset=dataset+'_train')
         test_data = TestbedDataset(root='data', dataset=dataset+'_test')
+        protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
+        print('protein_feat_dim:', protein_feat_dim)
         
         
         train_size = int(0.8 * len(train_data))
@@ -84,7 +86,10 @@ for dataset in datasets:
 
         # training the model
         device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-        model = modeling().to(device)
+        if model_st == 'GINConvNet':
+            model = modeling(protein_feat_dim=protein_feat_dim).to(device)
+        else:
+            model = modeling().to(device)
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
         best_mse = 1000
@@ -112,4 +117,3 @@ for dataset in datasets:
                 print('rmse improved at epoch ', best_epoch, '; best_test_mse,best_test_ci:', best_test_mse,best_test_ci,model_st,dataset)
             else:
                 print(ret[1],'No improvement since epoch ', best_epoch, '; best_test_mse,best_test_ci:', best_test_mse,best_test_ci,model_st,dataset)
-

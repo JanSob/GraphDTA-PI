@@ -7,8 +7,11 @@ from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 
 # GINConv model
 class GINConvNet(torch.nn.Module):
-    def __init__(self, n_output=1,num_features_xd=78, num_features_xt=25,
-                 n_filters=32, embed_dim=128, output_dim=128, dropout=0.2):
+    def __init__(self, n_output=1,num_features_xd=93, num_features_xt=25,
+                 n_filters=32, embed_dim=128, output_dim=128, 
+                 protein_feat_dim=0, # input size of joined target feature [V]
+                 protein_feat_hidden=64, # learned projection size
+                 dropout=0.2):
 
         super(GINConvNet, self).__init__()
 
@@ -36,6 +39,9 @@ class GINConvNet(torch.nn.Module):
         nn5 = Sequential(Linear(dim, dim), ReLU(), Linear(dim, dim))
         self.conv5 = GINConv(nn5)
         self.bn5 = torch.nn.BatchNorm1d(dim)
+        
+        # protein feature branch
+        self.fc_protein_feat = nn.Linear(protein_feat_dim, protein_feat_hidden)
 
         self.fc1_xd = Linear(dim, output_dim)
 
@@ -45,13 +51,15 @@ class GINConvNet(torch.nn.Module):
         self.fc1_xt = nn.Linear(32*121, output_dim)
 
         # combined layers
-        self.fc1 = nn.Linear(256, 1024)
+        self.fc1 = nn.Linear(256 + protein_feat_hidden, 1024)
         self.fc2 = nn.Linear(1024, 256)
         self.out = nn.Linear(256, self.n_output)        # n_output = 1 for regression task
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         target = data.target
+        # [batch, protein_feat_dim]
+        protein_feat = data.protein_feat.view(data.y.size(0),-1) # after batching protein_feat comes with extra dim
 
         x = F.relu(self.conv1(x, edge_index))
         x = self.bn1(x)
@@ -72,9 +80,13 @@ class GINConvNet(torch.nn.Module):
         # flatten
         xt = conv_xt.view(-1, 32 * 121)
         xt = self.fc1_xt(xt)
+        
+        pf = self.fc_protein_feat(protein_feat)
+        pf = self.relu(pf)
+        pf = self.dropout(pf)
 
         # concat
-        xc = torch.cat((x, xt), 1)
+        xc = torch.cat((x, xt, pf), 1)
         # add some dense layers
         xc = self.fc1(xc)
         xc = self.relu(xc)
