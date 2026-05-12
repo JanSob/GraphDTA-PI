@@ -8,7 +8,7 @@ import torch
 
 class TestbedDataset(InMemoryDataset):
     def __init__(self, root='/tmp', dataset='davis', 
-                 xd=None, xt=None, y=None, transform=None,
+                 xd=None, xt=None, xp=None, y=None, transform=None,
                  pre_transform=None,smile_graph=None):
 
         #root is required for save preprocessed data, default is '/tmp'
@@ -20,7 +20,7 @@ class TestbedDataset(InMemoryDataset):
             self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
         else:
             print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
-            self.process(xd, xt, y,smile_graph)
+            self.process(xd,xt,xp,y,smile_graph)
             self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
@@ -48,8 +48,8 @@ class TestbedDataset(InMemoryDataset):
     # XD - list of SMILES, XT: list of encoded target (categorical or one-hot),
     # Y: list of labels (i.e. affinity)
     # Return: PyTorch-Geometric format processed data
-    def process(self, xd, xt, y,smile_graph):
-        assert (len(xd) == len(xt) and len(xt) == len(y)), "The three lists must be the same length!"
+    def process(self, xd, xt, xp, y,smile_graph):
+        assert (len(xd) == len(xt) and len(xt) == len(xp) and len(xp) == len(y)), "The four lists must be the same length!"
         data_list = []
         data_len = len(xd)
         for i in range(data_len):
@@ -57,6 +57,7 @@ class TestbedDataset(InMemoryDataset):
             smiles = xd[i]
             target = xt[i]
             labels = y[i]
+            protein_feat = xp[i]
             # convert SMILES to molecular representation using rdkit
             c_size, features, edge_index, mol_features = smile_graph[smiles]
             # make the graph ready for PyTorch Geometrics GCN algorithms:
@@ -64,6 +65,7 @@ class TestbedDataset(InMemoryDataset):
                                 edge_index=torch.LongTensor(edge_index).transpose(1, 0),
                                 y=torch.FloatTensor([labels]))
             GCNData.target = torch.LongTensor([target])
+            GCNData.protein_feat = torch.FloatTensor([protein_feat])
             GCNData.mol_features = torch.FloatTensor([mol_features])
             GCNData.__setitem__('c_size', torch.LongTensor([c_size]))
             # append graph, label and target sequence to data list
