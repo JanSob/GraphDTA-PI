@@ -84,6 +84,14 @@ for dataset in datasets:
         test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
 
         # training the model
+        if torch.cuda.is_available():
+            device = torch.device(cuda_name)
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        print('device:', device)
+        
         device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
         
         if model_st == 'GINConvNet':
