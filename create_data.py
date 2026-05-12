@@ -54,6 +54,12 @@ def seq_cat(prot):
         x[i] = seq_dict[ch]
     return x  
 
+def seq_cat_unk(prot, max_len):
+    x = np.zeros(max_len)
+    for i, ch in enumerate(str(prot)[:max_len]):
+        x[i] = seq_dict.get(ch, 0)
+    return x
+
 # one-hot encoding for protein features 
 def one_hot_value(value, vocab):
     return [1.0 if value == v else 0.0 for v in vocab]
@@ -74,6 +80,8 @@ def build_target_feature_map(feature_df):
         feat += [float(row['has_structure']) if str(row['has_structure']).strip() != '' else 0.0]
         feat += [float(row['pocket_hydrophobicity']) if str(row['pocket_hydrophobicity']).strip() != '' else 0.0]
         feat += [float(row['pocket_charge']) if str(row['pocket_charge']).strip() != '' else 0.0]
+        # iter 2, added to protein_feat 
+        feat += [float(row['activation_loop_state']) if str(row['activation_loop_state']).strip() != '' else 0.0]
         feat += one_hot_value(row['kinase_group'], group_vocab)
         feat += one_hot_value(row['kinase_family'], family_vocab)
         feat += one_hot_value(row['kinase_subfamily'], subfamily_vocab)
@@ -82,6 +90,22 @@ def build_target_feature_map(feature_df):
         
         target_feat_map[row['target_id']] = np.asarray(feat, dtype=np.float32)
     return target_feat_map    
+
+# build feature maps for klifs_85_residue_sequence, gatekeeper_residue, hinge_residues (protein feature iter 2)
+def build_target_sequence_maps(feature_df):
+    feature_df = feature_df.fillna('')
+
+    pocket_map = {}
+    gatekeeper_map = {}
+    hinge_map = {}
+
+    for _, row in feature_df.iterrows():
+        target_id = row['target_id']
+        pocket_map[target_id] = seq_cat_unk(row['klifs_85_residue_sequence'], 85)
+        gatekeeper_map[target_id] = seq_cat_unk(row['gatekeeper_residue'], 1)
+        hinge_map[target_id] = seq_cat_unk(row['hinge_residues'], 3)
+
+    return pocket_map, gatekeeper_map, hinge_map
 
 # from DeepDTA data
 all_prots = []
@@ -162,30 +186,40 @@ for dataset in datasets:
         # read protein features 
         target_feature_df = pd.read_csv('data/' + dataset + '_target_features.csv')
         target_feature_map = build_target_feature_map(target_feature_df)
+        pocket_map, gatekeeper_map, hinge_map = build_target_sequence_maps(target_feature_df)
         
         df = pd.read_csv('data/' + dataset + '_train.csv')
         # structure change: now stores target_id as well
         train_drugs,train_target_ids,train_prots,train_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
         XT = [seq_cat(t) for t in train_prots]
+        XK = [pocket_map[tid] for tid in train_target_ids]
+        XG = [gatekeeper_map[tid] for tid in train_target_ids]
+        XH = [hinge_map[tid] for tid in train_target_ids]
         # map each target_id to the correspoding row in feature table
         XP = [target_feature_map[tid] for tid in train_target_ids]
-        train_drugs,train_prots,train_feat,train_Y = np.asarray(train_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(train_Y)
+        train_drugs,train_prots,train_feat,train_pocket,train_gatekeeper,train_hinge,train_Y = np.asarray(train_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(XK),np.asarray(XG),np.asarray(XH),np.asarray(train_Y)
         
         df = pd.read_csv('data/' + dataset + '_test.csv')
         test_drugs,test_target_ids,test_prots,test_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
         XT = [seq_cat(t) for t in test_prots]
+        # separate tensors for residues-related protein features
+        XK = [pocket_map[tid] for tid in test_target_ids]
+        XG = [gatekeeper_map[tid] for tid in test_target_ids]
+        XH = [hinge_map[tid] for tid in test_target_ids]
         XP = [target_feature_map[tid] for tid in test_target_ids]
-        test_drugs,test_prots,test_feat,test_Y = np.asarray(test_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(test_Y)
+        test_drugs,test_prots,test_feat,test_pocket,test_gatekeeper,test_hinge,test_Y = np.asarray(test_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(XK),np.asarray(XG),np.asarray(XH),np.asarray(test_Y)
 
         # make data PyTorch Geometric ready
         print('preparing ', dataset + '_train.pt in pytorch format!')
         train_data = TestbedDataset(root='data', dataset=dataset+'_train', 
-                                    xd=train_drugs, xt=train_prots, 
-                                    xp=train_feat,y=train_Y,smile_graph=smile_graph)
+                                    xd=train_drugs, xt=train_prots, xp=train_feat,
+                                    xk=train_pocket, xg=train_gatekeeper, xh=train_hinge,
+                                    y=train_Y,smile_graph=smile_graph)
         print('preparing ', dataset + '_test.pt in pytorch format!')
         test_data = TestbedDataset(root='data', dataset=dataset+'_test', 
-                                   xd=test_drugs, xt=test_prots, 
-                                   xp=test_feat,y=test_Y,smile_graph=smile_graph)
+                                   xd=test_drugs, xt=test_prots, xp=test_feat,
+                                   xk=test_pocket, xg=test_gatekeeper, xh=test_hinge,
+                                   y=test_Y,smile_graph=smile_graph)
         print(processed_data_file_train, ' and ', processed_data_file_test, ' have been created')        
     else:
         print(processed_data_file_train, ' and ', processed_data_file_test, ' are already created')        
