@@ -7,8 +7,9 @@ from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 
 # GINConv model
 class GINConvNet(torch.nn.Module):
-    def __init__(self, n_output=1,num_features_xd=78, num_features_xt=25,
-                 n_filters=32, embed_dim=128, output_dim=128, dropout=0.2):
+    def __init__(self, n_output=1, num_features_xd=93, num_features_xt=25,
+                 num_features_mol=8, n_filters=32, embed_dim=128,
+                 output_dim=128, dropout=0.2):
 
         super(GINConvNet, self).__init__()
 
@@ -42,16 +43,17 @@ class GINConvNet(torch.nn.Module):
         # 1D convolution on protein sequence
         self.embedding_xt = nn.Embedding(num_features_xt + 1, embed_dim)
         self.conv_xt_1 = nn.Conv1d(in_channels=1000, out_channels=n_filters, kernel_size=8)
-        self.fc1_xt = nn.Linear(32*121, output_dim)
+        self.fc1_xt = nn.Linear(32 * 121, output_dim)
 
         # combined layers
-        self.fc1 = nn.Linear(256, 1024)
+        self.fc1 = nn.Linear(output_dim + output_dim + num_features_mol, 1024)
         self.fc2 = nn.Linear(1024, 256)
-        self.out = nn.Linear(256, self.n_output)        # n_output = 1 for regression task
+        self.out = nn.Linear(256, self.n_output)  # n_output = 1 for regression task
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         target = data.target
+        mol_features = data.mol_features
 
         x = F.relu(self.conv1(x, edge_index))
         x = self.bn1(x)
@@ -74,7 +76,7 @@ class GINConvNet(torch.nn.Module):
         xt = self.fc1_xt(xt)
 
         # concat
-        xc = torch.cat((x, xt), 1)
+        xc = torch.cat((x, xt, mol_features), 1)
         # add some dense layers
         xc = self.fc1(xc)
         xc = self.relu(xc)

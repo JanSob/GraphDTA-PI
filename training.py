@@ -76,7 +76,14 @@ for dataset in datasets:
         test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
 
         # training the model
-        device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device(cuda_name)
+        else:
+            device = torch.device("cpu")
+
+        print("Using device:", device)
         model = modeling().to(device)
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
