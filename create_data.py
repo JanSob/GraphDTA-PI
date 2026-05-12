@@ -109,6 +109,34 @@ def seq_cat(prot):
         x[i] = seq_dict[ch]
     return x  
 
+# one-hot encoding for protein features 
+def one_hot_value(value, vocab):
+    return [1.0 if value == v else 0.0 for v in vocab]
+# one numeric feature [V] per target_id
+def build_target_feature_map(feature_df):
+    feature_df = feature_df.fillna('')
+    
+    group_vocab = sorted(feature_df['kinase_group'].unique())
+    family_vocab = sorted(feature_df['kinase_family'].unique())
+    subfamily_vocab = sorted(feature_df['kinase_subfamily'].unique())
+    dfg_vocab = sorted(feature_df['dfg_state'].unique())
+    ac_vocab = sorted(feature_df['ac_helix_state'].unique())
+    
+    target_feat_map = {}
+    
+    for _, row in feature_df.iterrows():
+        feat = []
+        feat += [float(row['has_structure']) if str(row['has_structure']).strip() != '' else 0.0]
+        feat += [float(row['pocket_hydrophobicity']) if str(row['pocket_hydrophobicity']).strip() != '' else 0.0]
+        feat += [float(row['pocket_charge']) if str(row['pocket_charge']).strip() != '' else 0.0]
+        feat += one_hot_value(row['kinase_group'], group_vocab)
+        feat += one_hot_value(row['kinase_family'], family_vocab)
+        feat += one_hot_value(row['kinase_subfamily'], subfamily_vocab)
+        feat += one_hot_value(row['dfg_state'], dfg_vocab)
+        feat += one_hot_value(row['ac_helix_state'], ac_vocab)
+        
+        target_feat_map[row['target_id']] = np.asarray(feat, dtype=np.float32)
+    return target_feat_map    
 
 # from DeepDTA data
 # Data is prepared --> load proteins, affinity scores, ligands
@@ -191,20 +219,33 @@ for dataset in datasets:
     processed_data_file_train = 'data/processed/' + dataset + '_train.pt'
     processed_data_file_test = 'data/processed/' + dataset + '_test.pt'
     if ((not os.path.isfile(processed_data_file_train)) or (not os.path.isfile(processed_data_file_test))):
+        # read protein features 
+        target_feature_df = pd.read_csv('data/' + dataset + '_target_features.csv')
+        target_feature_map = build_target_feature_map(target_feature_df)
+        
         df = pd.read_csv('data/' + dataset + '_train.csv')
-        train_drugs, train_prots,  train_Y = list(df['compound_iso_smiles']),list(df['target_sequence']),list(df['affinity'])
+        # structure change: now stores target_id as well
+        train_drugs,train_target_ids,train_prots,train_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
         XT = [seq_cat(t) for t in train_prots]
-        train_drugs, train_prots,  train_Y = np.asarray(train_drugs), np.asarray(XT), np.asarray(train_Y)
+        # map each target_id to the correspoding row in feature table
+        XP = [target_feature_map[tid] for tid in train_target_ids]
+        train_drugs,train_prots,train_feat,train_Y = np.asarray(train_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(train_Y)
+        
         df = pd.read_csv('data/' + dataset + '_test.csv')
-        test_drugs, test_prots,  test_Y = list(df['compound_iso_smiles']),list(df['target_sequence']),list(df['affinity'])
+        test_drugs,test_target_ids,test_prots,test_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
         XT = [seq_cat(t) for t in test_prots]
-        test_drugs, test_prots,  test_Y = np.asarray(test_drugs), np.asarray(XT), np.asarray(test_Y)
+        XP = [target_feature_map[tid] for tid in test_target_ids]
+        test_drugs,test_prots,test_feat,test_Y = np.asarray(test_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(test_Y)
 
         # make data PyTorch Geometric ready (library used for graph neural networks)
         print('preparing ', dataset + '_train.pt in pytorch format!')
-        train_data = TestbedDataset(root='data', dataset=dataset+'_train', xd=train_drugs, xt=train_prots, y=train_Y,smile_graph=smile_graph)
+        train_data = TestbedDataset(root='data', dataset=dataset+'_train', 
+                                    xd=train_drugs, xt=train_prots, 
+                                    xp=train_feat,y=train_Y,smile_graph=smile_graph)
         print('preparing ', dataset + '_test.pt in pytorch format!')
-        test_data = TestbedDataset(root='data', dataset=dataset+'_test', xd=test_drugs, xt=test_prots, y=test_Y,smile_graph=smile_graph)
+        test_data = TestbedDataset(root='data', dataset=dataset+'_test', 
+                                   xd=test_drugs, xt=test_prots, 
+                                   xp=test_feat,y=test_Y,smile_graph=smile_graph)
         print(processed_data_file_train, ' and ', processed_data_file_test, ' have been created')        
     else:
         print(processed_data_file_train, ' and ', processed_data_file_test, ' are already created')        
