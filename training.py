@@ -42,13 +42,13 @@ def predicting(model, device, loader):
     return total_labels.numpy().flatten(),total_preds.numpy().flatten()
 
 
-datasets = [['davis','kiba'][int(sys.argv[1])]] 
+datasets = [['davis','kiba'][int(sys.argv[1])]]
 modeling = [GINConvNet, GATNet, GAT_GCN, GCNNet][int(sys.argv[2])]
 model_st = modeling.__name__
 
 cuda_name = "cuda:0"
 if len(sys.argv)>3:
-    cuda_name = "cuda:" + str(int(sys.argv[3])) 
+    cuda_name = "cuda:" + str(int(sys.argv[3]))
 print('cuda_name:', cuda_name)
 
 TRAIN_BATCH_SIZE = 512
@@ -76,29 +76,28 @@ for dataset in datasets:
     else:
         train_data = TestbedDataset(root='data', dataset=dataset+'_train')
         test_data = TestbedDataset(root='data', dataset=dataset+'_test')
-        protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
-        print('protein_feat_dim:', protein_feat_dim)
-        
-        # make data PyTorch mini-batch processing ready
+
+        if model_st == 'GINConvNet':
+            protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
+            print('protein_feat_dim:', protein_feat_dim)
+
         train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
         test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
 
-        # training the model
-        if torch.cuda.is_available():
-            device = torch.device(cuda_name)
-        elif torch.backends.mps.is_available():
+        if torch.backends.mps.is_available():
             device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device(cuda_name)
         else:
             device = torch.device("cpu")
+
         print('device:', device)
-        
-        device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-        
+
         if model_st == 'GINConvNet':
             model = modeling(protein_feat_dim=protein_feat_dim).to(device)
         else:
             model = modeling().to(device)
-        
+
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
         best_mse = 1000
