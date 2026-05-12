@@ -11,6 +11,9 @@ class GINConvNet(torch.nn.Module):
                  n_filters=32, embed_dim=128, output_dim=128, 
                  protein_feat_dim=0, # input size of joined target feature [V]
                  protein_feat_hidden=64, # learned projection size
+                 klifs_hidden=64,
+                 gatekeeper_hidden=16,
+                 hinge_hidden=32,
                  dropout=0.2):
 
         super(GINConvNet, self).__init__()
@@ -49,9 +52,13 @@ class GINConvNet(torch.nn.Module):
         self.embedding_xt = nn.Embedding(num_features_xt + 1, embed_dim)
         self.conv_xt_1 = nn.Conv1d(in_channels=1000, out_channels=n_filters, kernel_size=8)
         self.fc1_xt = nn.Linear(32*121, output_dim)
+        self.conv_klifs_1 = nn.Conv1d(in_channels=85, out_channels=n_filters, kernel_size=8)
+        self.fc1_klifs = nn.Linear(32*121, klifs_hidden)
+        self.fc_gatekeeper = nn.Linear(embed_dim, gatekeeper_hidden)
+        self.fc_hinge = nn.Linear(3 * embed_dim, hinge_hidden)
 
         # combined layers
-        self.fc1 = nn.Linear(256 + protein_feat_hidden, 1024)
+        self.fc1 = nn.Linear(256 + protein_feat_hidden + klifs_hidden + gatekeeper_hidden + hinge_hidden, 1024)
         self.fc2 = nn.Linear(1024, 256)
         self.out = nn.Linear(256, self.n_output)        # n_output = 1 for regression task
 
@@ -59,7 +66,11 @@ class GINConvNet(torch.nn.Module):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         target = data.target
         # [batch, protein_feat_dim]
-        protein_feat = data.protein_feat.view(data.y.size(0),-1) # after batching protein_feat comes with extra dim
+        batch_size = target.size(0)
+        protein_feat = data.protein_feat.view(batch_size, -1)
+        klifs_pocket = data.klifs_pocket.view(batch_size, -1)
+        gatekeeper = data.gatekeeper.view(batch_size, -1)
+        hinge = data.hinge.view(batch_size, -1)
 
         x = F.relu(self.conv1(x, edge_index))
         x = self.bn1(x)
@@ -80,13 +91,31 @@ class GINConvNet(torch.nn.Module):
         # flatten
         xt = conv_xt.view(-1, 32 * 121)
         xt = self.fc1_xt(xt)
+
+        embedded_klifs = self.embedding_xt(klifs_pocket)
+        conv_klifs = self.conv_klifs_1(embedded_klifs)
+        kp = conv_klifs.view(-1, 32 * 121)
+        kp = self.fc1_klifs(kp)
+
+        embedded_gatekeeper = self.embedding_xt(gatekeeper).view(batch_size, -1)
+        gk = self.fc_gatekeeper(embedded_gatekeeper)
+        gk = self.relu(gk)
+        gk = self.dropout(gk)
+
+        embedded_hinge = self.embedding_xt(hinge).view(batch_size, -1)
+        hg = self.fc_hinge(embedded_hinge)
+        hg = self.relu(hg)
+        hg = self.dropout(hg)
         
         pf = self.fc_protein_feat(protein_feat)
         pf = self.relu(pf)
         pf = self.dropout(pf)
 
+        kp = self.relu(kp)
+        kp = self.dropout(kp)
+
         # concat
-        xc = torch.cat((x, xt, pf), 1)
+        xc = torch.cat((x, xt, pf, kp, gk, hg), 1)
         # add some dense layers
         xc = self.fc1(xc)
         xc = self.relu(xc)
