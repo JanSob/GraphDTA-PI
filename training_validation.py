@@ -57,6 +57,12 @@ LR = 0.0005
 LOG_INTERVAL = 20
 NUM_EPOCHS = 1000
 
+# debug defaults for local iteration
+# TRAIN_BATCH_SIZE = 64
+# TEST_BATCH_SIZE = 64
+# LOG_INTERVAL = 1
+# NUM_EPOCHS = 20
+
 print('Learning rate: ', LR)
 print('Epochs: ', NUM_EPOCHS)
 
