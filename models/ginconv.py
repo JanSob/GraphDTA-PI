@@ -7,7 +7,7 @@ from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 
 # GINConv model
 class GINConvNet(torch.nn.Module):
-    def __init__(self, n_output=1, num_features_xd=93, num_features_xt=25,
+    def __init__(self, n_output=1, num_features_xd=99, num_features_xt=25,
                  num_features_mol=8, n_filters=32, embed_dim=128,
                  output_dim=128, protein_feat_dim=0,
                  protein_feat_hidden=64, klifs_hidden=64,

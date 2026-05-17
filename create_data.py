@@ -1,21 +1,71 @@
 import pandas as pd
 import numpy as np
 import os
-import json,pickle
+import json, pickle
 from collections import OrderedDict
-from rdkit import Chem
-from rdkit.Chem import MolFromSmiles
+from rdkit import Chem, RDConfig
+from rdkit.Chem import MolFromSmiles, Descriptors, rdMolDescriptors, ChemicalFeatures
 import networkx as nx
 from utils import *
-
 from kinase_features import build_all_target_feature_tables
 
-def atom_features(atom):
+fdef_name = os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef')
+feature_factory = ChemicalFeatures.BuildFeatureFactory(fdef_name)
+
+
+# Builds a per-atom boolean pharmacophore matrix from RDKit chemical features.
+# Columns: [Donor, Acceptor, Hydrophobe/LumpedHydrophobe, Aromatic, PosIonizable, NegIonizable]
+def pharmacophore_atom_flags(mol):
+    flags = np.zeros((mol.GetNumAtoms(), 6), dtype=bool)
+
+    for feature in feature_factory.GetFeaturesForMol(mol):
+        family = feature.GetFamily()
+
+        for atom_id in feature.GetAtomIds():
+            if family == 'Donor':
+                flags[atom_id][0] = True
+            elif family == 'Acceptor':
+                flags[atom_id][1] = True
+            elif family in ['Hydrophobe', 'LumpedHydrophobe']:
+                flags[atom_id][2] = True
+            elif family == 'Aromatic':
+                flags[atom_id][3] = True
+            elif family == 'PosIonizable':
+                flags[atom_id][4] = True
+            elif family == 'NegIonizable':
+                flags[atom_id][5] = True
+
+    return flags
+
+
+# This function one-hot-encodes / numerically encodes the features of a single ligand atom.
+#
+# Original atom features:
+# - atom type
+# - atom degree: number of directly bonded neighboring atoms
+# - total number of hydrogens bonded to the atom
+# - implicit valence
+# - aromaticity
+#
+# Added atom features:
+# - formal charge
+# - hybridization
+# - ring membership: whether the atom is part of a ring
+# - heteroatom flag: whether the atom is not carbon or hydrogen
+# - halogen flag: whether the atom is F, Cl, Br, or I
+# - pharmacophore flags: donor, acceptor, hydrophobe, aromatic, positive ionizable, negative ionizable
+def atom_features(atom, pharm_flags):
     return np.array(one_of_k_encoding_unk(atom.GetSymbol(),['C', 'N', 'O', 'S', 'F', 'Si', 'P', 'Cl', 'Br', 'Mg', 'Na','Ca', 'Fe', 'As', 'Al', 'I', 'B', 'V', 'K', 'Tl', 'Yb','Sb', 'Sn', 'Ag', 'Pd', 'Co', 'Se', 'Ti', 'Zn', 'H','Li', 'Ge', 'Cu', 'Au', 'Ni', 'Cd', 'In', 'Mn', 'Zr','Cr', 'Pt', 'Hg', 'Pb', 'Unknown']) +
                     one_of_k_encoding(atom.GetDegree(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
                     one_of_k_encoding_unk(atom.GetTotalNumHs(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
                     one_of_k_encoding_unk(atom.GetImplicitValence(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
-                    [atom.GetIsAromatic()])
+                    one_of_k_encoding_unk(atom.GetFormalCharge(), [-2, -1, 0, 1, 2, 'Other']) +
+                    one_of_k_encoding_unk(str(atom.GetHybridization()),['SP', 'SP2', 'SP3', 'SP3D', 'SP3D2', 'Other']) +
+                    [atom.GetIsAromatic(),
+                     atom.IsInRing(),
+                     atom.GetSymbol() not in ['C', 'H'],
+                     atom.GetSymbol() in ['F', 'Cl', 'Br', 'I']] +
+                    list(pharm_flags))
 
 def one_of_k_encoding(x, allowable_set):
     if x not in allowable_set:
@@ -28,15 +78,43 @@ def one_of_k_encoding_unk(x, allowable_set):
         x = allowable_set[-1]
     return list(map(lambda s: x == s, allowable_set))
 
+# This function creates a molecule-level/global ligand feature vector.
+# Unlike atom_features(atom), these descriptors describe the whole ligand molecule,
+# not a single atom or bond.
+#
+# Added molecule-level features:
+# - molecular weight
+# - logP: lipophilicity / hydrophobicity estimate
+# - TPSA: topological polar surface area
+# - number of rotatable bonds
+# - number of H-bond donors
+# - number of H-bond acceptors
+# - number of heteroatoms
+# - number of rings
+def molecule_features(mol):
+    return np.array([
+        Descriptors.MolWt(mol),
+        Descriptors.MolLogP(mol),
+        rdMolDescriptors.CalcTPSA(mol),
+        Descriptors.NumRotatableBonds(mol),
+        Descriptors.NumHDonors(mol),
+        Descriptors.NumHAcceptors(mol),
+        Descriptors.NumHeteroatoms(mol),
+        rdMolDescriptors.CalcNumRings(mol),
+    ])
+
 def smile_to_graph(smile):
     mol = Chem.MolFromSmiles(smile)
-    
+
+    mol_features = molecule_features(mol)
+    pharm_flags = pharmacophore_atom_flags(mol)
+
     c_size = mol.GetNumAtoms()
-    
+
     features = []
     for atom in mol.GetAtoms():
-        feature = atom_features(atom)
-        features.append( feature / sum(feature) )
+        feature = atom_features(atom, pharm_flags[atom.GetIdx()])
+        features.append(feature / sum(feature))
 
     edges = []
     for bond in mol.GetBonds():
@@ -46,7 +124,7 @@ def smile_to_graph(smile):
     for e1, e2 in g.edges:
         edge_index.append([e1, e2])
         
-    return c_size, features, edge_index
+    return c_size, features, edge_index, mol_features
 
 def seq_cat(prot):
     x = np.zeros(max_seq_len)
@@ -60,36 +138,36 @@ def seq_cat_unk(prot, max_len):
         x[i] = seq_dict.get(ch, 0)
     return x
 
-# one-hot encoding for protein features 
+# one-hot encoding for protein features
 def one_hot_value(value, vocab):
     return [1.0 if value == v else 0.0 for v in vocab]
 # one numeric feature [V] per target_id
 def build_target_feature_map(feature_df):
     feature_df = feature_df.fillna('')
-    
+
     group_vocab = sorted(feature_df['kinase_group'].unique())
     family_vocab = sorted(feature_df['kinase_family'].unique())
     subfamily_vocab = sorted(feature_df['kinase_subfamily'].unique())
     dfg_vocab = sorted(feature_df['dfg_state'].unique())
     ac_vocab = sorted(feature_df['ac_helix_state'].unique())
-    
+
     target_feat_map = {}
-    
+
     for _, row in feature_df.iterrows():
         feat = []
         feat += [float(row['has_structure']) if str(row['has_structure']).strip() != '' else 0.0]
         feat += [float(row['pocket_hydrophobicity']) if str(row['pocket_hydrophobicity']).strip() != '' else 0.0]
         feat += [float(row['pocket_charge']) if str(row['pocket_charge']).strip() != '' else 0.0]
-        # iter 2, added to protein_feat 
+        # iter 2, added to protein_feat
         feat += [float(row['activation_loop_state']) if str(row['activation_loop_state']).strip() != '' else 0.0]
         feat += one_hot_value(row['kinase_group'], group_vocab)
         feat += one_hot_value(row['kinase_family'], family_vocab)
         feat += one_hot_value(row['kinase_subfamily'], subfamily_vocab)
         feat += one_hot_value(row['dfg_state'], dfg_vocab)
         feat += one_hot_value(row['ac_helix_state'], ac_vocab)
-        
+
         target_feat_map[row['target_id']] = np.asarray(feat, dtype=np.float32)
-    return target_feat_map    
+    return target_feat_map
 
 # build feature maps for klifs_85_residue_sequence, gatekeeper_residue, hinge_residues (protein feature iter 2)
 def build_target_sequence_maps(feature_df):
@@ -119,19 +197,19 @@ for dataset in datasets:
     ligands = json.load(open(fpath + "ligands_can.txt"), object_pairs_hook=OrderedDict)
     proteins = json.load(open(fpath + "proteins.txt"), object_pairs_hook=OrderedDict)
     affinity = pickle.load(open(fpath + "Y","rb"), encoding='latin1')
-    
+
     drugs = []
     for d in ligands.keys():
         lg = Chem.MolToSmiles(Chem.MolFromSmiles(ligands[d]),isomericSmiles=True)
         drugs.append(lg)
-    
-    # to add additional features, we don't drop prot_id 
+
+    # to add additional features, we don't drop prot_id
     prot_ids = []
     prot_seqs = []
     for t in proteins.keys():
         prot_ids.append(t)
         prot_seqs.append(proteins[t])
-    
+
     if dataset == 'davis':
         affinity = [-np.log10(y/1e9) for y in affinity]
     affinity = np.asarray(affinity)
@@ -183,11 +261,11 @@ for dataset in datasets:
     processed_data_file_train = 'data/processed/' + dataset + '_train.pt'
     processed_data_file_test = 'data/processed/' + dataset + '_test.pt'
     if ((not os.path.isfile(processed_data_file_train)) or (not os.path.isfile(processed_data_file_test))):
-        # read protein features 
+        # read protein features
         target_feature_df = pd.read_csv('data/' + dataset + '_target_features.csv')
         target_feature_map = build_target_feature_map(target_feature_df)
         pocket_map, gatekeeper_map, hinge_map = build_target_sequence_maps(target_feature_df)
-        
+
         df = pd.read_csv('data/' + dataset + '_train.csv')
         # structure change: now stores target_id as well
         train_drugs,train_target_ids,train_prots,train_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
@@ -198,7 +276,7 @@ for dataset in datasets:
         # map each target_id to the correspoding row in feature table
         XP = [target_feature_map[tid] for tid in train_target_ids]
         train_drugs,train_prots,train_feat,train_pocket,train_gatekeeper,train_hinge,train_Y = np.asarray(train_drugs),np.asarray(XT),np.asarray(XP, dtype=np.float32),np.asarray(XK),np.asarray(XG),np.asarray(XH),np.asarray(train_Y)
-        
+
         df = pd.read_csv('data/' + dataset + '_test.csv')
         test_drugs,test_target_ids,test_prots,test_Y = list(df['compound_iso_smiles']),list(df['target_id']),list(df['target_sequence']),list(df['affinity'])
         XT = [seq_cat(t) for t in test_prots]
@@ -211,15 +289,15 @@ for dataset in datasets:
 
         # make data PyTorch Geometric ready
         print('preparing ', dataset + '_train.pt in pytorch format!')
-        train_data = TestbedDataset(root='data', dataset=dataset+'_train', 
+        train_data = TestbedDataset(root='data', dataset=dataset+'_train',
                                     xd=train_drugs, xt=train_prots, xp=train_feat,
                                     xk=train_pocket, xg=train_gatekeeper, xh=train_hinge,
                                     y=train_Y,smile_graph=smile_graph)
         print('preparing ', dataset + '_test.pt in pytorch format!')
-        test_data = TestbedDataset(root='data', dataset=dataset+'_test', 
+        test_data = TestbedDataset(root='data', dataset=dataset+'_test',
                                    xd=test_drugs, xt=test_prots, xp=test_feat,
                                    xk=test_pocket, xg=test_gatekeeper, xh=test_hinge,
                                    y=test_Y,smile_graph=smile_graph)
         print(processed_data_file_train, ' and ', processed_data_file_test, ' have been created')        
     else:
-        print(processed_data_file_train, ' and ', processed_data_file_test, ' are already created')        
+        print(processed_data_file_train, ' and ', processed_data_file_test, ' are already created')
