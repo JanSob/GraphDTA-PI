@@ -62,12 +62,13 @@ class TestbedDataset(InMemoryDataset):
             gatekeeper = xg[i]
             hinge = xh[i]
             # convert SMILES to molecular representation using rdkit
-            c_size, features, edge_index = smile_graph[smiles]
+            c_size, features, edge_index, mol_features = smile_graph[smiles]
             # make the graph ready for PyTorch Geometrics GCN algorithms:
             GCNData = DATA.Data(x=torch.Tensor(features),
                                 edge_index=torch.LongTensor(edge_index).transpose(1, 0),
                                 y=torch.FloatTensor([labels]))
             GCNData.target = torch.LongTensor([target])
+            GCNData.mol_features = torch.FloatTensor(mol_features).view(1, -1)
             GCNData.protein_feat = torch.FloatTensor([protein_feat])
             GCNData.klifs_pocket = torch.LongTensor([klifs_pocket])
             GCNData.gatekeeper = torch.LongTensor([gatekeeper])
