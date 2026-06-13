@@ -98,7 +98,7 @@ def main():
     test_data = TestbedDataset(root="data", dataset=dataset + "_test")
 
     # Index of the test sample used for the prototype run.
-    sample_index = 0
+    sample_index = 948
     full_data = test_data[sample_index]
 
     protein_feat_dim = full_data.protein_feat.view(-1).shape[0]
