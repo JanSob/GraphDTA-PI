@@ -14,7 +14,8 @@ from ligand_features import (
 Subgraph explanation utilities.
 
 Builds ligand mining graphs, enumerates connected subgraphs, converts
-subgraphs to PyG inputs, and handles sufficient fragment combinations.
+selected atom sets into masked full-graph PyG inputs, and handles
+sufficient fragment combinations.
 """
 
 def smile_to_mining_graph(smile):
@@ -150,26 +151,27 @@ def enumerate_connected_subgraphs(neighbor_map, max_size=None):
 
 
 def subgraph_to_pyg_data(mining_graph, subgraph_atoms):
-    """Convert a ligand subgraph into a PyTorch Geometric Data object."""
-    subgraph_atoms = sorted(subgraph_atoms)
-
-    atom_index_map = {
-        old_atom_idx: new_atom_idx
-        for new_atom_idx, old_atom_idx in enumerate(subgraph_atoms)
-    }
+    """Convert selected atoms into a masked full-graph PyTorch Geometric sample."""
+    selected_atoms = set(subgraph_atoms)
+    full_atom_indices = sorted(mining_graph["atom_indices"])
 
     features = []
-    for old_atom_idx in subgraph_atoms:
-        features.append(mining_graph["atom_features_by_index"][old_atom_idx])
+    node_mask = []
+
+    for atom_idx in full_atom_indices:
+        atom_feature = mining_graph["atom_features_by_index"][atom_idx]
+
+        if atom_idx in selected_atoms:
+            features.append(atom_feature)
+            node_mask.append([1.0])
+        else:
+            features.append(np.zeros_like(atom_feature, dtype=np.float32))
+            node_mask.append([0.0])
 
     edge_index = []
     for atom_a_idx, atom_b_idx in mining_graph["undirected_edges"]:
-        if atom_a_idx in atom_index_map and atom_b_idx in atom_index_map:
-            new_atom_a_idx = atom_index_map[atom_a_idx]
-            new_atom_b_idx = atom_index_map[atom_b_idx]
-
-            edge_index.append([new_atom_a_idx, new_atom_b_idx])
-            edge_index.append([new_atom_b_idx, new_atom_a_idx])
+        edge_index.append([atom_a_idx, atom_b_idx])
+        edge_index.append([atom_b_idx, atom_a_idx])
 
     if len(edge_index) == 0:
         edge_index_tensor = torch.empty((2, 0), dtype=torch.long)
@@ -181,13 +183,14 @@ def subgraph_to_pyg_data(mining_graph, subgraph_atoms):
         edge_index=edge_index_tensor
     )
 
-    graph_data.mol_features = torch.FloatTensor(
-        mining_graph["molecule_level_features"]
-    ).view(1, -1)
-
+    graph_data.node_mask = torch.FloatTensor(np.asarray(node_mask, dtype=np.float32))
+    graph_data.mol_features = torch.zeros(
+        (1, len(mining_graph["molecule_level_features"])),
+        dtype=torch.float32
+    )
     graph_data.__setitem__(
         "c_size",
-        torch.LongTensor([len(subgraph_atoms)])
+        torch.LongTensor([len(full_atom_indices)])
     )
 
     return graph_data
