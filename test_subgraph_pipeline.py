@@ -10,13 +10,13 @@ from dataset import TestbedDataset
 from subgraph_explainer import (
     smile_to_mining_graph,
     enumerate_connected_subgraphs,
+    bitmask_to_atoms,
     subgraph_to_pyg_data,
     attach_target_fields,
     filter_minimal_sufficient_subgraphs,
     describe_subgraph_atoms,
     subgraph_to_smiles,
     generate_pairwise_disjoint_combinations,
-    union_subgraph_combination,
     deduplicate_sufficient_subgraphs_by_atoms,
     format_subgraph_components,
 )
@@ -71,6 +71,53 @@ def predict_many(model, device, data_list, batch_size=256):
 
     return predictions
 
+
+def predict_candidate_batches(model, device, full_data, mining_graph, candidate_iter, batch_size=256):
+    """Run batched model predictions for streaming candidate subgraphs."""
+    model.eval()
+    batch_data = []
+    batch_records = []
+
+    # batch candidate scoring so we don't store every Data object at once
+    def flush():
+        nonlocal batch_data, batch_records
+
+        if not batch_data:
+            return
+
+        predictions = []
+        loader = DataLoader(batch_data, batch_size=batch_size, shuffle=False)
+
+        with torch.no_grad():
+            for batch in loader:
+                batch = batch.to(device)
+                output = model(batch)
+                predictions.extend(output.cpu().view(-1).tolist())
+
+        current_records = batch_records
+        batch_data = []
+        batch_records = []
+
+        for record, prediction in zip(current_records, predictions):
+            yield record, prediction
+
+    for union_mask, components in candidate_iter:
+        subgraph_data = subgraph_to_pyg_data(mining_graph, union_mask)
+        subgraph_data = attach_target_fields(subgraph_data, full_data)
+
+        batch_data.append(subgraph_data)
+        batch_records.append({
+            "mask": union_mask,
+            "components": components,
+            "num_components": len(components),
+            "size": union_mask.bit_count(),
+        })
+
+        if len(batch_data) >= batch_size:
+            yield from flush()
+
+    yield from flush()
+
 def main():
     """Run the subgraph explanation prototype for one selected test sample."""
     dataset = "davis"
@@ -113,15 +160,23 @@ def main():
 
     mining_graph = smile_to_mining_graph(smiles)
 
+    print("atom_count:", mining_graph["atom_count"])
+
+    subgraph_count = sum(
+        1
+        for _ in enumerate_connected_subgraphs(
+            mining_graph["neighbor_map"],
+            max_size=max_subgraph_size
+        )
+    )
+    print("number of connected subgraphs:", subgraph_count)
+
+    full_prediction = predict_single(model, device, full_data)
+
     subgraphs = enumerate_connected_subgraphs(
         mining_graph["neighbor_map"],
         max_size=max_subgraph_size
     )
-
-    print("atom_count:", mining_graph["atom_count"])
-    print("number of connected subgraphs:", len(subgraphs))
-
-    full_prediction = predict_single(model, device, full_data)
 
     candidate_combinations = generate_pairwise_disjoint_combinations(
         subgraphs,
@@ -129,47 +184,27 @@ def main():
         max_total_atoms=max_total_atoms
     )
 
-    print("number of candidate combinations:", len(candidate_combinations))
+    print("Predicting candidates in batches...")
 
-    candidate_data_list = []
-    candidate_records = []
+    sufficient_subgraphs = []
+    candidate_count = 0
 
-    print("Building candidate Data objects...")
-    total_candidates = len(candidate_combinations)
+    for record, subgraph_prediction in predict_candidate_batches(
+        model,
+        device,
+        full_data,
+        mining_graph,
+        candidate_combinations,
+        batch_size=256
+    ):
+        candidate_count += 1
 
-    for index, subgraph_combination in enumerate(candidate_combinations, start=1):
-        if index == 1 or index % 5000 == 0 or index == total_candidates:
+        if candidate_count == 1 or candidate_count % 5000 == 0:
             print(
-                f"Building candidates: {index}/{total_candidates}",
+                f"Processed candidates: {candidate_count}",
                 flush=True
             )
 
-        union_atoms = union_subgraph_combination(subgraph_combination)
-
-        subgraph_data = subgraph_to_pyg_data(mining_graph, union_atoms)
-        subgraph_data = attach_target_fields(subgraph_data, full_data)
-
-        candidate_data_list.append(subgraph_data)
-
-        candidate_records.append({
-            "atoms": union_atoms,
-            "components": subgraph_combination,
-            "num_components": len(subgraph_combination),
-            "size": len(union_atoms),
-        })
-
-    print("Predicting candidates in batches...")
-
-    candidate_predictions = predict_many(
-        model,
-        device,
-        candidate_data_list,
-        batch_size=256
-    )
-
-    sufficient_subgraphs = []
-
-    for record, subgraph_prediction in zip(candidate_records, candidate_predictions):
         difference = abs(full_prediction - subgraph_prediction)
 
         if difference <= epsilon:
@@ -178,6 +213,8 @@ def main():
                 "prediction": subgraph_prediction,
                 "difference": difference,
             })
+
+    print("number of candidate combinations:", candidate_count)
 
     sufficient_subgraphs = deduplicate_sufficient_subgraphs_by_atoms(
         sufficient_subgraphs
@@ -221,10 +258,10 @@ def main():
         for item in minimal_sufficient_subgraphs:
             fragment_smiles = subgraph_to_smiles(
                 mining_graph,
-                item["atoms"]
+                item["mask"]
             )
 
-            components = item.get("components", (item["atoms"],))
+            components = item.get("components", (item["mask"],))
 
             component_smiles = [
                 subgraph_to_smiles(mining_graph, component)
@@ -237,8 +274,8 @@ def main():
                 "model_name": model_name,
                 "full_smiles": smiles,
                 "fragment_smiles": fragment_smiles,
-                "atom_indices": sorted(item["atoms"]),
-                "num_components": item.get("num_components", 1),
+                "atom_indices": bitmask_to_atoms(item["mask"]),
+                "num_components": item["num_components"],
                 "components": json.dumps(format_subgraph_components(components)),
                 "component_smiles": json.dumps(component_smiles),
                 "size": item["size"],
@@ -266,17 +303,17 @@ def main():
     for item in minimal_sufficient_subgraphs[:20]:
         atom_descriptions = describe_subgraph_atoms(
             mining_graph,
-            item["atoms"]
+            item["mask"]
         )
 
         fragment_smiles = subgraph_to_smiles(
             mining_graph,
-            item["atoms"]
+            item["mask"]
         )
 
         print(
-            "atoms:", item["atoms"],
-            "| components:", item.get("num_components", 1),
+            "atoms:", bitmask_to_atoms(item["mask"]),
+            "| components:", item["num_components"],
             "| size:", item["size"],
             "| prediction:", round(item["prediction"], 4),
             "| difference:", round(item["difference"], 4),
