@@ -4,6 +4,7 @@ import sys, os
 from random import shuffle
 import torch
 import torch.nn as nn
+from dataset import TestbedDataset
 from models.gat import GATNet
 from models.gat_gcn import GAT_GCN
 from models.gcn import GCNNet

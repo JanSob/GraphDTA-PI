@@ -46,11 +46,20 @@ class GINConvNet(torch.nn.Module):
         self.conv_xt_1 = nn.Conv1d(in_channels=1000, out_channels=n_filters, kernel_size=8)
         self.fc1_xt = nn.Linear(32 * 121, output_dim)
 
+        self.norm_mol = nn.LayerNorm(num_features_mol)
+        self.norm_protein_feat = nn.LayerNorm(protein_feat_dim)
         self.fc_protein_feat = nn.Linear(protein_feat_dim, protein_feat_hidden)
         self.conv_klifs_1 = nn.Conv1d(in_channels=85, out_channels=n_filters, kernel_size=8)
         self.fc1_klifs = nn.Linear(32 * 121, klifs_hidden)
         self.fc_gatekeeper = nn.Linear(embed_dim, gatekeeper_hidden)
         self.fc_hinge = nn.Linear(3 * embed_dim, hinge_hidden)
+        self.protein_context_dim = (
+            output_dim + protein_feat_hidden + klifs_hidden +
+            gatekeeper_hidden + hinge_hidden
+        )
+        self.protein_context = nn.Linear(self.protein_context_dim, output_dim)
+        self.protein_context_norm = nn.LayerNorm(self.protein_context_dim)
+        self.ligand_gate = nn.Linear(output_dim, output_dim)
 
         self.fc1 = nn.Linear(
             output_dim + output_dim + num_features_mol +
@@ -65,23 +74,39 @@ class GINConvNet(torch.nn.Module):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         target = data.target
         batch_size = target.size(0)
+        node_mask = getattr(data, "node_mask", None)
 
         mol_features = data.mol_features.view(batch_size, -1)
+        mol_features = self.norm_mol(mol_features)
         protein_feat = data.protein_feat.view(batch_size, -1)
+        protein_feat = self.norm_protein_feat(protein_feat)
         klifs_pocket = data.klifs_pocket.view(batch_size, -1)
         gatekeeper = data.gatekeeper.view(batch_size, -1)
         hinge = data.hinge.view(batch_size, -1)
 
+        if node_mask is not None:
+            x = x * node_mask
+
         x = F.relu(self.conv1(x, edge_index))
         x = self.bn1(x)
+        if node_mask is not None:
+            x = x * node_mask
         x = F.relu(self.conv2(x, edge_index))
         x = self.bn2(x)
+        if node_mask is not None:
+            x = x * node_mask
         x = F.relu(self.conv3(x, edge_index))
         x = self.bn3(x)
+        if node_mask is not None:
+            x = x * node_mask
         x = F.relu(self.conv4(x, edge_index))
         x = self.bn4(x)
+        if node_mask is not None:
+            x = x * node_mask
         x = F.relu(self.conv5(x, edge_index))
         x = self.bn5(x)
+        if node_mask is not None:
+            x = x * node_mask
         x = global_add_pool(x, batch)
         x = F.relu(self.fc1_xd(x))
         x = F.dropout(x, p=0.2, training=self.training)
@@ -112,7 +137,16 @@ class GINConvNet(torch.nn.Module):
         pf = self.relu(pf)
         pf = self.dropout(pf)
 
-        xc = torch.cat((x, xt, mol_features, pf, kp, gk, hg), 1)
+        protein_ctx = torch.cat((xt, pf, kp, gk, hg), 1)
+        protein_ctx = self.protein_context_norm(protein_ctx)
+        protein_ctx = self.protein_context(protein_ctx)
+        protein_ctx = self.relu(protein_ctx)
+        protein_ctx = self.dropout(protein_ctx)
+
+        gate = torch.sigmoid(self.ligand_gate(protein_ctx))
+        x = x * gate
+
+        xc = torch.cat((x, protein_ctx, mol_features, pf, kp, gk, hg), 1)
         xc = self.fc1(xc)
         xc = self.relu(xc)
         xc = self.dropout(xc)
