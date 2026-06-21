@@ -94,7 +94,10 @@ for dataset in datasets:
 
         print('device:', device)
 
-        if model_st == 'GINConvNet':
+        protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
+        print('protein_feat_dim:', protein_feat_dim)
+
+        if model_st in ['GINConvNet', 'GATNet', 'GCNNet']:
             model = modeling(protein_feat_dim=protein_feat_dim).to(device)
         else:
             model = modeling().to(device)

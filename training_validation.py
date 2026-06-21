@@ -2,8 +2,11 @@ import numpy as np
 import pandas as pd
 import sys, os
 from random import shuffle
+import inspect
 import torch
 import torch.nn as nn
+from torch_geometric.loader import DataLoader
+from dataset import TestbedDataset
 from models.gat import GATNet
 from models.gat_gcn import GAT_GCN
 from models.gcn import GCNNet
@@ -22,11 +25,13 @@ def train(model, device, train_loader, optimizer, epoch):
         loss.backward()
         optimizer.step()
         if batch_idx % LOG_INTERVAL == 0:
-            print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(epoch,
-                                                                           batch_idx * len(data.x),
-                                                                           len(train_loader.dataset),
-                                                                           100. * batch_idx / len(train_loader),
-                                                                           loss.item()))
+            print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch,
+                batch_idx * len(data.x),
+                len(train_loader.dataset),
+                100. * batch_idx / len(train_loader),
+                loss.item()
+            ))
 
 def predicting(model, device, loader):
     model.eval()
@@ -39,16 +44,20 @@ def predicting(model, device, loader):
             output = model(data)
             total_preds = torch.cat((total_preds, output.cpu()), 0)
             total_labels = torch.cat((total_labels, data.y.view(-1, 1).cpu()), 0)
-    return total_labels.numpy().flatten(),total_preds.numpy().flatten()
+    return total_labels.numpy().flatten(), total_preds.numpy().flatten()
 
 
-datasets = [['davis','kiba'][int(sys.argv[1])]] 
+def model_accepts_argument(model_class, argument_name):
+    signature = inspect.signature(model_class.__init__)
+    return argument_name in signature.parameters
+
+datasets = [['davis', 'kiba'][int(sys.argv[1])]]
 modeling = [GINConvNet, GATNet, GAT_GCN, GCNNet][int(sys.argv[2])]
 model_st = modeling.__name__
 
 cuda_name = "cuda:0"
-if len(sys.argv)>3:
-    cuda_name = ["cuda:0","cuda:1"][int(sys.argv[3])]
+if len(sys.argv) > 3:
+    cuda_name = "cuda:" + str(int(sys.argv[3]))
 print('cuda_name:', cuda_name)
 
 TRAIN_BATCH_SIZE = 512
@@ -68,27 +77,43 @@ print('Epochs: ', NUM_EPOCHS)
 
 # Main program: iterate over different datasets
 for dataset in datasets:
-    print('\nrunning on ', model_st + '_' + dataset )
+    print('\nrunning on ', model_st + '_' + dataset)
     processed_data_file_train = 'data/processed/' + dataset + '_train.pt'
     processed_data_file_test = 'data/processed/' + dataset + '_test.pt'
-    if ((not os.path.isfile(processed_data_file_train)) or (not os.path.isfile(processed_data_file_test))):
+    if ((not os.path.isfile(processed_data_file_train)) or
+            (not os.path.isfile(processed_data_file_test))):
         print('please run create_data.py to prepare data in pytorch format!')
     else:
-        train_data = TestbedDataset(root='data', dataset=dataset+'_train')
-        test_data = TestbedDataset(root='data', dataset=dataset+'_test')
-        protein_feat_dim = train_data[0].protein_feat.view(-1).shape[0]
+        train_data_full = TestbedDataset(root='data', dataset=dataset + '_train')
+        test_data = TestbedDataset(root='data', dataset=dataset + '_test')
+        protein_feat_dim = train_data_full[0].protein_feat.view(-1).shape[0]
         print('protein_feat_dim:', protein_feat_dim)
-        
-        
-        train_size = int(0.8 * len(train_data))
-        valid_size = len(train_data) - train_size
-        train_data, valid_data = torch.utils.data.random_split(train_data, [train_size, valid_size])        
-        
-        
+
+        train_size = int(0.8 * len(train_data_full))
+        valid_size = len(train_data_full) - train_size
+        train_data, valid_data = torch.utils.data.random_split(
+            train_data_full,
+            [train_size, valid_size]
+        )
+
         # make data PyTorch mini-batch processing ready
-        train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
-        valid_loader = DataLoader(valid_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
-        test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
+        train_loader = DataLoader(
+            train_data,
+            batch_size=TRAIN_BATCH_SIZE,
+            shuffle=True
+        )
+
+        valid_loader = DataLoader(
+            valid_data,
+            batch_size=TEST_BATCH_SIZE,
+            shuffle=False
+        )
+
+        test_loader = DataLoader(
+            test_data,
+            batch_size=TEST_BATCH_SIZE,
+            shuffle=False
+        )
 
         # training the model
         if torch.cuda.is_available():
@@ -98,36 +123,66 @@ for dataset in datasets:
         else:
             device = torch.device("cpu")
         print('device:', device)
-        
-        device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-        if model_st == 'GINConvNet':
+
+        # Pass protein_feat_dim only to models that support it.
+        # This keeps the script working even if GCNNet/GAT_GCN are not adapted yet.
+        if model_accepts_argument(modeling, "protein_feat_dim"):
             model = modeling(protein_feat_dim=protein_feat_dim).to(device)
         else:
             model = modeling().to(device)
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-        best_mse = 1000
+
+        best_valid_mse = 1000
         best_test_mse = 1000
         best_test_ci = 0
         best_epoch = -1
-        model_file_name = 'model_' + model_st + '_' + dataset +  '.model'
-        result_file_name = 'result_' + model_st + '_' + dataset +  '.csv'
+        model_file_name = 'model_' + model_st + '_' + dataset + '.model'
+        result_file_name = 'result_' + model_st + '_' + dataset + '.csv'
         for epoch in range(NUM_EPOCHS):
-            train(model, device, train_loader, optimizer, epoch+1)
+            train(model, device, train_loader, optimizer, epoch + 1)
             print('predicting for valid data')
-            G,P = predicting(model, device, valid_loader)
-            val = mse(G,P)
-            if val<best_mse:
-                best_mse = val
-                best_epoch = epoch+1
+            G, P = predicting(model, device, valid_loader)
+            valid_mse = mse(G, P)
+            if valid_mse < best_valid_mse:
+                best_valid_mse = valid_mse
+                best_epoch = epoch + 1
                 torch.save(model.state_dict(), model_file_name)
                 print('predicting for test data')
-                G,P = predicting(model, device, test_loader)
-                ret = [rmse(G,P),mse(G,P),pearson(G,P),spearman(G,P),ci(G,P)]
-                with open(result_file_name,'w') as f:
-                    f.write(','.join(map(str,ret)))
+                G, P = predicting(model, device, test_loader)
+                ret = [
+                    rmse(G, P),
+                    mse(G, P),
+                    pearson(G, P),
+                    spearman(G, P),
+                    ci(G, P)
+                ]
+
+                with open(result_file_name, 'w') as f:
+                    f.write(','.join(map(str, ret)))
                 best_test_mse = ret[1]
                 best_test_ci = ret[-1]
-                print('rmse improved at epoch ', best_epoch, '; best_test_mse,best_test_ci:', best_test_mse,best_test_ci,model_st,dataset)
+                print(
+                    'validation mse improved at epoch ',
+                    best_epoch,
+                    '; best_valid_mse:',
+                    best_valid_mse,
+                    '; best_test_mse,best_test_ci:',
+                    best_test_mse,
+                    best_test_ci,
+                    model_st,
+                    dataset
+                )
             else:
-                print(ret[1],'No improvement since epoch ', best_epoch, '; best_test_mse,best_test_ci:', best_test_mse,best_test_ci,model_st,dataset)
+                print(
+                    valid_mse,
+                    'No improvement since epoch ',
+                    best_epoch,
+                    '; best_valid_mse:',
+                    best_valid_mse,
+                    '; best_test_mse,best_test_ci:',
+                    best_test_mse,
+                    best_test_ci,
+                    model_st,
+                    dataset
+                )

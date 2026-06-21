@@ -3,6 +3,10 @@ import os
 import torch
 import pandas as pd
 import json
+import argparse
+
+from gradient_saliency_explainer import GradientSaliencyExplainer
+from occlusion_explainer import OcclusionExplainer
 
 from torch_geometric.loader import DataLoader
 from models.ginconv import GINConvNet
@@ -165,10 +169,43 @@ def predict_candidate_batches(
 
     yield from flush()
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run PI, occlusion, and gradient saliency explanations."
+    )
+
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=["all", "pi", "occlusion", "gradient"],
+        default=["all"],
+        help="Explanation methods to run."
+    )
+
+    parser.add_argument(
+        "--dataset",
+        default="davis",
+        choices=["davis", "kiba"],
+        help="Dataset to use."
+    )
+
+    parser.add_argument(
+        "--sample-index",
+        type=int,
+        default=948,
+        help="Sample index to explain."
+    )
+
+    return parser.parse_args()
+
+
+def should_run(methods, method_name):
+    return "all" in methods or method_name in methods
 
 def main():
     """Run the subgraph explanation prototype for one selected test sample."""
-    dataset = "davis"
+    args = parse_args()
+    dataset = args.dataset
     model_name = "GINConvNet"
     model_file = f"model_{model_name}_{dataset}.model"
 
@@ -199,7 +236,7 @@ def main():
     test_data = TestbedDataset(root="data", dataset=dataset + "_test")
 
     # Index of the test sample used for the prototype run.
-    sample_index = 948
+    sample_index = args.sample_index
     full_data = test_data[sample_index]
 
     protein_feat_dim = full_data.protein_feat.view(-1).shape[0]
@@ -227,6 +264,71 @@ def main():
     print("number of connected subgraphs:", subgraph_count)
 
     full_prediction = predict_single(model, device, full_data)
+
+    if should_run(args.methods, "occlusion"):
+        print("\nRunning leave-one-atom-out occlusion test...")
+
+        occlusion_explainer = OcclusionExplainer(
+            model=model,
+            device=device,
+            prediction_batch_size=prediction_batch_size,
+        )
+
+        atom_occlusion_results = occlusion_explainer.explain_atoms(
+            full_data=full_data,
+            mining_graph=mining_graph,
+            full_prediction=full_prediction,
+        )
+
+        occlusion_explainer.save_atom_results_csv(
+            atom_occlusion_results,
+            "atom_occlusion_results.csv",
+        )
+
+        print("\nTop occluded atoms:")
+        for item in atom_occlusion_results[:10]:
+            print(
+                "atom:", item["atom_idx"],
+                "| symbol:", item["atom_symbol"],
+                "| occluded prediction:", round(item["occluded_prediction"], 4),
+                "| delta:", round(item["prediction_delta"], 4),
+                "| importance:", round(item["importance"], 4),
+            )
+
+        print("\nSaved atom occlusion results to atom_occlusion_results.csv")
+
+    if should_run(args.methods, "gradient"):
+        print("\nRunning gradient saliency...")
+
+        saliency_explainer = GradientSaliencyExplainer(
+            model=model,
+            device=device,
+        )
+
+        saliency_results = saliency_explainer.explain_node_mask(
+            full_data=full_data,
+            mining_graph=mining_graph,
+        )
+
+        saliency_explainer.save_results_csv(
+            saliency_results,
+            "gradient_saliency_results.csv",
+        )
+
+        print("\nTop saliency atoms:")
+        for item in saliency_results[:10]:
+            print(
+                "atom:", item["atom_idx"],
+                "| symbol:", item["atom_symbol"],
+                "| gradient:", round(item["signed_gradient"], 6),
+                "| importance:", round(item["importance"], 6),
+            )
+
+        print("\nSaved gradient saliency results to gradient_saliency_results.csv")
+
+    if not should_run(args.methods, "pi"):
+        print("\nSkipping PI subgraph mining.")
+        return
 
     subgraphs = enumerate_connected_subgraphs(
         mining_graph["neighbor_map"],
