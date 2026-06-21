@@ -28,6 +28,7 @@ Loads a trained GraphDTA model, generates ligand subgraph combinations,
 predicts their affinity, and exports minimal sufficient fragments to CSV.
 """
 
+
 def get_device():
     """Return the best available torch device."""
     if torch.backends.mps.is_available():
@@ -49,6 +50,7 @@ def predict_single(model, device, data):
 
     return prediction.cpu().item()
 
+
 def predict_many(model, device, data_list, batch_size=256):
     """Run batched model predictions for multiple PyG Data samples."""
     model.eval()
@@ -61,7 +63,7 @@ def predict_many(model, device, data_list, batch_size=256):
         for batch_index, batch in enumerate(loader, start=1):
             if batch_index == 1 or batch_index % 10 == 0 or batch_index == total_batches:
                 print(
-                    f"Predicting batch {batch_index}/{total_batches}",
+                    f"Predicting model batch {batch_index}/{total_batches}",
                     flush=True
                 )
 
@@ -72,31 +74,76 @@ def predict_many(model, device, data_list, batch_size=256):
     return predictions
 
 
-def predict_candidate_batches(model, device, full_data, mining_graph, candidate_iter, batch_size=256):
-    """Run batched model predictions for streaming candidate subgraphs."""
+def predict_candidate_batches(
+    model,
+    device,
+    full_data,
+    mining_graph,
+    candidate_iter,
+    candidate_buffer_size=256,
+    prediction_batch_size=256,
+):
+    """
+    Run batched model predictions for streaming candidate subgraphs.
+
+    candidate_buffer_size:
+        Number of candidate Data objects temporarily kept in memory before prediction.
+
+    prediction_batch_size:
+        Batch size used inside the PyG DataLoader during model prediction.
+    """
     model.eval()
-    batch_data = []
-    batch_records = []
 
-    # batch candidate scoring so we don't store every Data object at once
+    candidate_data_buffer = []
+    candidate_record_buffer = []
+    predicted_candidate_batches = 0
+
     def flush():
-        nonlocal batch_data, batch_records
+        nonlocal candidate_data_buffer
+        nonlocal candidate_record_buffer
+        nonlocal predicted_candidate_batches
 
-        if not batch_data:
+        if not candidate_data_buffer:
             return
 
+        predicted_candidate_batches += 1
+
+        print(
+            f"Predicting candidate buffer {predicted_candidate_batches} "
+            f"with {len(candidate_data_buffer)} candidates",
+            flush=True
+        )
+
         predictions = []
-        loader = DataLoader(batch_data, batch_size=batch_size, shuffle=False)
+
+        loader = DataLoader(
+            candidate_data_buffer,
+            batch_size=prediction_batch_size,
+            shuffle=False
+        )
+
+        total_model_batches = len(loader)
 
         with torch.no_grad():
-            for batch in loader:
+            for batch_index, batch in enumerate(loader, start=1):
+                if (
+                    batch_index == 1
+                    or batch_index % 10 == 0
+                    or batch_index == total_model_batches
+                ):
+                    print(
+                        f"  Model batch {batch_index}/{total_model_batches}",
+                        flush=True
+                    )
+
                 batch = batch.to(device)
                 output = model(batch)
                 predictions.extend(output.cpu().view(-1).tolist())
 
-        current_records = batch_records
-        batch_data = []
-        batch_records = []
+        current_records = candidate_record_buffer
+
+        candidate_data_buffer = []
+        candidate_record_buffer = []
 
         for record, prediction in zip(current_records, predictions):
             yield record, prediction
@@ -105,18 +152,19 @@ def predict_candidate_batches(model, device, full_data, mining_graph, candidate_
         subgraph_data = subgraph_to_pyg_data(mining_graph, union_mask)
         subgraph_data = attach_target_fields(subgraph_data, full_data)
 
-        batch_data.append(subgraph_data)
-        batch_records.append({
+        candidate_data_buffer.append(subgraph_data)
+        candidate_record_buffer.append({
             "mask": union_mask,
             "components": components,
             "num_components": len(components),
             "size": union_mask.bit_count(),
         })
 
-        if len(batch_data) >= batch_size:
+        if len(candidate_data_buffer) >= candidate_buffer_size:
             yield from flush()
 
     yield from flush()
+
 
 def main():
     """Run the subgraph explanation prototype for one selected test sample."""
@@ -135,6 +183,12 @@ def main():
 
     # Maximum total number of atoms in the union of all subgraphs in one candidate explanation.
     max_total_atoms = 8
+
+    # Number of candidate explanations kept in memory before running predictions.
+    candidate_buffer_size = 4096
+
+    # Actual PyG DataLoader batch size used during model prediction.
+    prediction_batch_size = 256
 
     if not os.path.isfile(model_file):
         raise FileNotFoundError(f"Could not find model file: {model_file}")
@@ -169,6 +223,7 @@ def main():
             max_size=max_subgraph_size
         )
     )
+
     print("number of connected subgraphs:", subgraph_count)
 
     full_prediction = predict_single(model, device, full_data)
@@ -184,7 +239,7 @@ def main():
         max_total_atoms=max_total_atoms
     )
 
-    print("Predicting candidates in batches...")
+    print("Predicting candidates in buffered batches...")
 
     sufficient_subgraphs = []
     candidate_count = 0
@@ -195,7 +250,8 @@ def main():
         full_data,
         mining_graph,
         candidate_combinations,
-        batch_size=256
+        candidate_buffer_size=candidate_buffer_size,
+        prediction_batch_size=prediction_batch_size,
     ):
         candidate_count += 1
 
