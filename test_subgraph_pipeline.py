@@ -387,6 +387,28 @@ def main():
         sufficient_subgraphs
     )
 
+    full_mask = (1 << mining_graph["atom_count"]) - 1
+    occluded_data_list = []
+
+    for item in minimal_sufficient_subgraphs:
+        occluded_mask = full_mask & ~item["mask"]
+        occluded_data = subgraph_to_pyg_data(mining_graph, occluded_mask)
+        occluded_data = attach_target_fields(occluded_data, full_data)
+        occluded_data_list.append(occluded_data)
+
+    occluded_predictions = predict_many(
+        model,
+        device,
+        occluded_data_list,
+        batch_size=prediction_batch_size,
+    )
+
+    for item, occluded_prediction in zip(minimal_sufficient_subgraphs, occluded_predictions):
+        indispensability_delta = full_prediction - occluded_prediction
+        item["occluded_prediction"] = occluded_prediction
+        item["indispensability_delta"] = indispensability_delta
+        item["indispensability"] = abs(indispensability_delta)
+
     output_file = "minimal_sufficient_subgraphs.csv"
 
     with open(output_file, "w", newline="") as csvfile:
@@ -401,6 +423,9 @@ def main():
             "full_prediction",
             "fragment_prediction",
             "difference",
+            "occluded_prediction",
+            "indispensability_delta",
+            "indispensability",
             "epsilon",
             "max_subgraph_size",
             "dataset",
@@ -440,6 +465,9 @@ def main():
                 "full_prediction": full_prediction,
                 "fragment_prediction": item["prediction"],
                 "difference": item["difference"],
+                "occluded_prediction": item["occluded_prediction"],
+                "indispensability_delta": item["indispensability_delta"],
+                "indispensability": item["indispensability"],
                 "epsilon": epsilon,
                 "max_subgraph_size": max_subgraph_size,
                 "max_combination_size": max_combination_size,
